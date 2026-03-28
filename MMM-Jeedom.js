@@ -1,8 +1,5 @@
 'use strict';
 
-//pour gerer le PIR et le module.hidden en meme temps
-var UserPresence = true; // par défaut on est présent (pas de sensor PIR pour couper)
-
 Module.register("MMM-Jeedom", {
 	// Default module config.
 	defaults: {
@@ -30,16 +27,15 @@ Module.register("MMM-Jeedom", {
 			},
 		],
 
-		Virtual_API: "", // Code APi de vos virtual
+		Virtual_API: "", // Code API de vos virtual
 		TempID: "", // ID pour la température
 		HumID: "", // ID pour l'humidité
 		jeedomAPIPath: "/core/api/jeeApi.php", //URL Path for get info
-		jeedomAPIPathUPDT: "/core/api/jeeApi.php?plugin=virtual&type=event&", //url PAth for update
+		jeedomAPIPathUPDT: "/core/api/jeeApi.php?plugin=virtual&type=event&", //url Path for update
 		jeedomHTTPS: true
 	},
 
 	start: function () {
-
 		Log.log('LOG' + this.name + ' is started!');
 		// Set locale.
 		moment.locale(config.language);
@@ -48,6 +44,7 @@ Module.register("MMM-Jeedom", {
 		var self = this;
 		this.debug = true;
 		this.ModuleJeedomHidden = false; // par défaut on affiche le module (si pas de module carousel ou autre pour le cacher)
+		this.userPresence = true; // FIX #7 : variable d'instance au lieu de globale
 		this.IntervalID = 0; // à déclarer pour chaque instance pour pouvoir couper la mise à jour pour chacune
 		this.lastUpdate = 0;
 
@@ -78,18 +75,15 @@ Module.register("MMM-Jeedom", {
 			};
 			this.sensors.push(newSensor);
 		}
-		Log.log(this.sensors);
 
 		// first update on start
 		self.updateJeedom();
 	},
 
-	//Modif AgP42 - 11/07/2018	
-
 	suspend: function () { //fct core appelée quand le module est caché
-		this.ModuleJeedomHidden = true; //Il aurait été plus propre d'utiliser this.hidden, mais comportement aléatoire...
+		this.ModuleJeedomHidden = true;
 		this.debugger("Fct suspend - ModuleHidden = " + this.ModuleJeedomHidden);
-		this.GestionUpdateInterval(); //on appele la fonction qui gere tous les cas
+		this.GestionUpdateInterval();
 	},
 
 	resume: function () { //fct core appelée quand le module est affiché
@@ -104,31 +98,55 @@ Module.register("MMM-Jeedom", {
 		}
 	},
 
+	// FIX #1 : une seule fonction notificationReceived fusionnant USER_PRESENCE, INDOOR_TEMPERATURE et INDOOR_HUMIDITY
 	notificationReceived: function (notification, payload, sender) {
 		this.debugger("Fct notif notif !!! " + notification);
-		if (notification === "USER_PRESENCE") { // notification envoyée par le module MMM-PIR-Sensor. Voir sa doc
+
+		if (notification === "USER_PRESENCE") {
 			this.debugger("Fct notificationReceived USER_PRESENCE - payload = " + payload);
-			UserPresence = payload;
+			this.userPresence = payload; // FIX #7 : variable d'instance
 			this.GestionUpdateInterval();
+		}
+
+		if (notification === "INDOOR_TEMPERATURE") {
+			if (this.config.Virtual_API != '') {
+				this.debugger(`API : ${this.config.Virtual_API} `);
+				if (this.config.TempID != '') {
+					this.indoorTemperature = this.roundValue(payload);
+					this.debugger(`la temperature remontée est ${this.indoorTemperature}`);
+					this.debugger(`l'adresse de jeedom est ${this.config.jeedomURL}`);
+					this.updatejeedom(this.config.TempID, this.indoorTemperature);
+					this.debugger(`${this.name} renvoie la temp ${this.indoorTemperature}`);
+				}
+			}
+		}
+
+		if (notification === "INDOOR_HUMIDITY") {
+			if (this.config.Virtual_API != '') {
+				if (this.config.HumID != '') { // FIX #2 : "HumdID" → "HumID"
+					this.debugger(` HumID: ${this.config.HumID}`);
+					this.indoorHumidity = this.roundValue(payload);
+					this.updatejeedom(this.config.HumID, this.indoorHumidity);
+					this.debugger(`${this.name} renvoie l humidite :  ${this.indoorHumidity}`);
+				}
+			}
 		}
 	},
 
 	GestionUpdateInterval: function () {
-		this.debugger("Call GestionUpdateInterval : " + UserPresence + " / " + this.ModuleJeedomHidden);
-		if (UserPresence === true && this.ModuleJeedomHidden === false) { // on s'assure d'avoir un utilisateur présent devant l'écran (sensor PIR) et que le module soit bien affiché
+		this.debugger("Call GestionUpdateInterval : " + this.userPresence + " / " + this.ModuleJeedomHidden);
+		if (this.userPresence === true && this.ModuleJeedomHidden === false) {
 			var self = this;
 			this.debugger(this.name + " est revenu et user present ! On update");
 
-			// update tout de suite
 			self.updateJeedom();
-			//et on remet l'intervalle d'update en route, si aucun deja actif (pour éviter les instances multiples)
 			if (this.IntervalID === 0) {
 				this.IntervalID = setInterval(function () { self.updateJeedom(); }, this.config.updateInterval);
 			}
-		} else { //sinon (UserPresence = false OU ModuleHidden = true)
+		} else {
 			this.debugger("Personne regarde : on stop l'update ! ID : " + this.IntervalID);
-			clearInterval(this.IntervalID); // on arrete l'intervalle d'update en cours
-			this.IntervalID = 0; //on reset la variable
+			clearInterval(this.IntervalID);
+			this.IntervalID = 0;
 		}
 	},
 
@@ -157,29 +175,20 @@ Module.register("MMM-Jeedom", {
 
 			if (sensor.boolean && sensor.status > 1) sensor.status = 1;
 
-			if ((sensor.status == 0 && sensor.hideempty)) continue; //si on voulait cacher les vide et qu'il est vide, on fait rien...
-			if ((sensor.status == "On" && sensor.hiddenon) || (sensor.status == "Off" && sensor.hiddenoff)) continue; //si on voulait cacher les On et qu'il est On, on fait rien...
+			if ((sensor.status == 0 && sensor.hideempty)) continue;
+			if ((sensor.status == "On" && sensor.hiddenon) || (sensor.status == "Off" && sensor.hiddenoff)) continue;
 
-			//si sameLine1 définie, on memorise pour écrire au prochain tour avec la variable suivante et on sort de la boucle sans rien afficher
 			if (sensor.sameLine1) {
-
-				//on memorise les infos :
 				sameLineValueMemorisation = sensor.status;
 				if (typeof sensor.unit !== 'undefined') {
 					sameLineUnitMemorisation = sensor.unit;
 				}
-
-				//		Log.log ("on est en sameLine1 , value : "	+sameLineValueMemorisation
-				//		+" , unit : " +  sameLineUnitMemorisation 
-				//		/*+ " sameLinePosition : " + sameLinePosition*/); 
-
 				continue;
 			}
 
-			var sensorWrapper = document.createElement("tr"); //on créé la liste principale, qu'on va remplir après
+			var sensorWrapper = document.createElement("tr");
 			sensorWrapper.className = "normal";
 
-			//on commence par afficher le symbole, selon tous les cas possible : symbol; symbolon, symboloff, ...
 			var symbolTD = document.createElement('td');
 			symbolTD.className = "symbol align-left";
 			var symbol = document.createElement('i');
@@ -188,9 +197,8 @@ Module.register("MMM-Jeedom", {
 			if (typeof sensor.boolean == 'undefined') symbolClass = sensor.symbol;
 			symbol.className = symbolClass;
 			symbolTD.appendChild(symbol);
-			sensorWrapper.appendChild(symbolTD); //et on ajoute le symbole au Wrapper
+			sensorWrapper.appendChild(symbolTD);
 
-			//puis on s'occupe du titre
 			var titleTD = document.createElement('td');
 			titleTD.className = "title bright align-left";
 			titleTD.innerHTML = sensor.sname;
@@ -201,10 +209,8 @@ Module.register("MMM-Jeedom", {
 			}
 			sensorWrapper.appendChild(titleTD);
 
-			//si c'est pas un boolean, on affiche la valeur (jeedom) et l'unité (config)
 			var statusTD = document.createElement('td');
 			statusTD.className = "time light align-right";
-			//si c'est un "sameLine2", on affiche celui mémorisé précédemment avant de continuer
 			if (sensor.sameLine2) {
 				statusTD.innerHTML = statusTD.innerHTML + sameLineValueMemorisation + " "
 					+ sameLineUnitMemorisation + " - ";
@@ -226,13 +232,11 @@ Module.register("MMM-Jeedom", {
 				sensorWrapper.appendChild(statusTD);
 			}
 
-			tableWrap.appendChild(sensorWrapper); //on ajoute tout ca à notre table
+			tableWrap.appendChild(sensorWrapper);
 		}
-		wrapper.appendChild(tableWrap); //quand la table est finie (loop des sensors finie), on l'ajoute au wrapper
+		wrapper.appendChild(tableWrap);
 
-		//si on veut afficher la date du last update, on va l'ajouter à la fin
 		if (this.config.displayLastUpdate) {
-
 			var updateinfo = document.createElement("div");
 			updateinfo.className = "xsmall light align-left";
 			updateinfo.innerHTML = "Update : " + moment.unix(this.lastUpdate).format(this.config.displayLastUpdateFormat);
@@ -242,61 +246,29 @@ Module.register("MMM-Jeedom", {
 		return wrapper;
 
 	},
+
 	updateJeedom: function () {
 		this.sendSocketNotification('RELOAD', this.config);
 		this.debugger("Jeedom RELOAD " + Date.now() / 1000);
-		if (this.config.displayLastUpdate) {
-			this.lastUpdate = Date.now() / 1000; //memorise la date de la demande d'update pour chaque instance			
-			this.debugger("Update Jeedom demandée pour " + this.config.sensors[0].idx + " - à : " + moment.unix(this.lastUpdate).format('dd - HH:mm:ss'));
-		}
-		//	this.sendNotification("SHOW_ALERT",{type:"notification",message:"Update Jeedom demandée"});
 	},
 
 	socketNotificationReceived: function (notification, payload) {
-		//console.log(`notification : ${notification} ; payload : ${payload}`)
 		if (notification === "RELOAD_DONE") {
 			this.result = payload;
-			//Log.log(payload);
 
 			for (var c in this.sensors) {
 				var sensor = this.sensors[c];
 				if (payload.result[sensor.idx] != null) {
 					sensor.status = payload.result[sensor.idx].value;
-
-					/*			Log.log("Fct socketNotificationReceived - lastUpdate : "
-								+ moment.unix(this.lastUpdate).format('dd - HH:mm:ss') 
-								+ "pour le sensor : " + this.config.sensors[0].idx
-								+ "resultat :" + sensor.status);*/
-
 				}
 			}
 			this.loaded = true;
-			this.updateDom(this.animationSpeed);
-		}
-	},
-	notificationReceived: function (notification, payload, sender) {
-		//console.log (`API : ${this.config.Virtual_API} , TempID : ${this.config.TempID}, HumID: ${this.config.HumID}`)
-		if (notification === "INDOOR_TEMPERATURE") {
-			if (this.config.Virtual_API != '') {
-				this.debugger(`API : ${this.config.Virtual_API} `)
-				if (this.config.TempID != '') {
-					this.indoorTemperature = this.roundValue(payload);
-					this.debugger(`la temperaure remonté est ${this.indoorTemperature}`);
-					this.debugger(`l'adresse de jeedom est ${this.config.jeedomURL}`);
-					this.updatejeedom(this.config.TempID, this.indoorTemperature);
-					this.debugger(`${this.name} renvoie la temp ${this.indoorTemperature}`)
-				}
+			// FIX #8 : lastUpdate mis à jour à la réception de la réponse
+			if (this.config.displayLastUpdate) {
+				this.lastUpdate = Date.now() / 1000;
+				this.debugger("Update Jeedom reçue pour " + this.config.sensors[0].idx + " - à : " + moment.unix(this.lastUpdate).format('dd - HH:mm:ss'));
 			}
-		}
-		if (notification === "INDOOR_HUMIDITY") {
-			if (this.config.Virtual_API != '') {
-				if (this.config.HumdID != '') {
-					this.debugger(` HumID: ${this.config.HumID}`)
-					this.indoorHumidity = this.roundValue(payload);
-					this.updatejeedom(this.config.HumID, this.indoorHumidity);
-					this.debugger(`${this.name} renvoie l humidite :  ${this.indoorHumidity}`);
-				}
-			}
+			this.updateDom(this.config.animationSpeed); // FIX #4 : this.config.animationSpeed
 		}
 	},
 
@@ -307,18 +279,24 @@ Module.register("MMM-Jeedom", {
 	},
 
 	updatejeedom: function (ID, Values) {
-		var self = this;
-		var url = '';
-		if (this.ID == '') {
-			console.log('Pas d ID de valeur Jeedom')
-		} else {
-			var jeedomprot = this.config.jeedomHTTPS ? "https" : "http";
-			url = jeedomprot + "://" + this.config.jeedomURL + this.config.jeedomAPIPathUPDT + "&apikey=" + this.config.Virtual_API + "&id=" + ID + "&value=" + Values
-			this.debugger(`ToJeedom >> ${url}`)
-			var xmlHttp = new XMLHttpRequest();
-			xmlHttp.open("GET", url, false); // false for synchronous request
-			xmlHttp.send(null);
-			this.debugger(`ToJeedom >> Status : ${xmlHttp.status}-${xmlHttp.statusText} Reponse : ${xmlHttp.responseText}`);
+		// FIX #3 : vérification sur le paramètre ID (et non this.ID)
+		if (!ID || ID === '') {
+			console.log('Pas d ID de valeur Jeedom');
+			return;
 		}
+		var jeedomprot = this.config.jeedomHTTPS ? "https" : "http";
+		var url = jeedomprot + "://" + this.config.jeedomURL + this.config.jeedomAPIPathUPDT + "&apikey=" + this.config.Virtual_API + "&id=" + ID + "&value=" + Values;
+		this.debugger(`ToJeedom >> ${url}`);
+
+		// FIX #6 : requête asynchrone (ne bloque plus le thread UI)
+		var self = this;
+		var xmlHttp = new XMLHttpRequest();
+		xmlHttp.open("GET", url, true);
+		xmlHttp.onreadystatechange = function () {
+			if (xmlHttp.readyState === 4) {
+				self.debugger(`ToJeedom >> Status : ${xmlHttp.status}-${xmlHttp.statusText} Reponse : ${xmlHttp.responseText}`);
+			}
+		};
+		xmlHttp.send(null);
 	},
 });

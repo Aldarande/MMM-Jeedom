@@ -19,11 +19,9 @@ module.exports = NodeHelper.create({
 			}
 			i++;
 		}
-		//var postData = '{"jsonrpc": "2.0", "id": "1000", "method": "cmd::execCmd", "params": {"apikey": "';
 		var postData = '{"jsonrpc": "2.0", "id": "1000", "method": "cmd::execCmd", "params": {"options":"", "apikey": "';
 		postData = postData + refConfig.jeedomAPIKey + '", "id": ' + ids + ']}}';
-		//modif AGP
-		console.log(postData);
+
 		var options = {
 			hostname: refConfig.jeedomURL,
 			port: refConfig.jeedomPORT,
@@ -34,37 +32,37 @@ module.exports = NodeHelper.create({
 				'Content-Length': Buffer.byteLength(postData)
 			}
 		};
-		console.log(options)
+
 		var protocol = refConfig.jeedomHTTPS ? https : http;
 		var req = protocol.request(options, (res) => {
 			res.setEncoding('utf8');
+
+			// FIX #5 : accumulation des chunks avant parsing
+			var rawData = '';
 			res.on('data', (chunk) => {
-				try {
-					self.sendSocketNotification("RELOAD_DONE", JSON.parse(chunk));
-				}
-				catch (e) {
-					console.log(`Jeedom parsing :`, e.message)
-				}
+				rawData += chunk;
 			});
 			res.on('end', () => {
+				try {
+					self.sendSocketNotification("RELOAD_DONE", JSON.parse(rawData));
+				} catch (e) {
+					console.log(`Jeedom parsing :`, e.message);
+				}
+			});
+		});
 
-			});
-			req.on('error', (e) => {
-				console.log(`problem with request: ${e.message}`);
-			});
+		req.on('error', (e) => {
+			console.log(`problem with request: ${e.message}`);
 		});
 
 		// write data to request body
 		req.write(postData);
 		req.end();
-
 	},
 
 	socketNotificationReceived: function (notification, payload) {
 		if (notification === 'RELOAD') {
-			for (var c in payload.sensors) {
-				var sensor = payload.sensors[c];
-			}
+			// FIX #9 : boucle morte supprimée
 			this.reload(payload);
 		}
 	}
